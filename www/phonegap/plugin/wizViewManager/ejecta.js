@@ -24,11 +24,14 @@ window.screen = {
 
 window.navigator = {
 	userAgent: ej.userAgent,
-	appVersion: ej.appVersion
+	appVersion: ej.appVersion,
+	get onLine() { return ej.onLine; } // re-evaluate on each get
 };
 
 // Create the default screen canvas
 window.canvas = new Ejecta.Canvas();
+window.canvas.type = 'canvas';
+window.canvas.style = {};
 
 // The console object
 window.console = {
@@ -51,7 +54,20 @@ window.console.debug =
 	window.console.error =
 	window.console.log;
 
-console.log("Width " + window.screen.availWidth + " height " + window.screen.availHeight);
+// CommonJS style require()
+var loadedModules = {};
+window.require = function( name ) {
+	var id = name.replace(/\.js$/,'');
+	if( !loadedModules[id] ) {
+		var exports = {};
+		var module = { id: id, uri: id + '.js', exports: exports };
+		ejecta.requireModule( id, module, exports );
+		// Some modules override module.exports, so use the module.exports reference only after loading the module
+		loadedModules[id] = module.exports;
+	}
+	
+	return loadedModules[id];
+};
 
 // Timers
 window.setTimeout = function(cb, t){ return ej.setTimeout(cb, t); };
@@ -72,6 +88,7 @@ window.localStorage = new Ejecta.LocalStorage();
 HTMLElement = function( tagName ){ 
 	this.tagName = tagName;
 	this.children = [];
+	this.style = {};
 };
 
 HTMLElement.prototype.appendChild = function( element ) {
@@ -80,7 +97,7 @@ HTMLElement.prototype.appendChild = function( element ) {
 	// If the child is a script element, begin to load it
 	if( element.tagName == 'script' ) {
 		ej.setTimeout( function(){
-			ej.require( element.src );
+			ej.include( element.src );
 			if( element.onload ) {
 				element.onload();
 			}
@@ -100,7 +117,10 @@ window.document = {
 	
 	createElement: function( name ) {
 		if( name === 'canvas' ) {
-			return new Ejecta.Canvas();
+			var canvas = new Ejecta.Canvas();
+			canvas.type = 'canvas';
+			canvas.style = {};
+			return canvas;
 		}
 		else if( name == 'audio' ) {
 			return new Ejecta.Audio();
@@ -157,8 +177,8 @@ window.document = {
 	},
 	
 	_eventInitializers: {},
-	_publishEvent: function( type, event ) {
-		var listeners = this.events[ type ];
+	_publishEvent: function( event ) {
+		var listeners = this.events[ event.type ];
 		if( !listeners ) { return; }
 		
 		for( var i = 0; i < listeners.length; i++ ) {
@@ -172,6 +192,8 @@ window.canvas.addEventListener = window.addEventListener = function( type, callb
 window.canvas.removeEventListener = window.removeEventListener = function( type, callback ) { 
 	window.document.removeEventListener(type,callback); 
 };
+
+var eventInit = document._eventInitializers;
 
 
 
@@ -197,44 +219,112 @@ var publishTouchEvent = function( type, all, changed ) {
 	touchEvent.changedTouches = changed;
 	touchEvent.type = type;
 	
-	document._publishEvent( type, touchEvent );
+	document._publishEvent( touchEvent );
 };
-window.document._eventInitializers.touchstart =
-	window.document._eventInitializers.touchend =
-	window.document._eventInitializers.touchmove = function() {
-	if( !touchInput ) {
-		touchInput = new Ejecta.TouchInput();
-		touchInput.ontouchstart = function( all, changed ){ publishTouchEvent( 'touchstart', all, changed ); };
-		touchInput.ontouchend = function( all, changed ){ publishTouchEvent( 'touchend', all, changed ); };
-		touchInput.ontouchmove = function( all, changed ){ publishTouchEvent( 'touchmove', all, changed ); };
-	}
+eventInit.touchstart = eventInit.touchend = eventInit.touchmove = function() {
+	if( touchInput ) { return; }
+
+	touchInput = new Ejecta.TouchInput();
+	touchInput.ontouchstart = function( all, changed ){ publishTouchEvent( 'touchstart', all, changed ); };
+	touchInput.ontouchend = function( all, changed ){ publishTouchEvent( 'touchend', all, changed ); };
+	touchInput.ontouchmove = function( all, changed ){ publishTouchEvent( 'touchmove', all, changed ); };
 };
 
 
 
-// Devicemotion events
+// DeviceMotion and DeviceOrientation events
 
-var accelerometer = null;
+var deviceMotion = null;
 var deviceMotionEvent = {
 	type: 'devicemotion', 
-	target: {type:'canvas'},
+	target: canvas,
+	interval: 16,
 	acceleration: {x: 0, y: 0, z: 0},
 	accelerationIncludingGravity: {x: 0, y: 0, z: 0},
+	rotationRate: {alpha: 0, beta: 0, gamma: 0},
 	preventDefault: function(){},
 	stopPropagation: function(){}
 };
 
-window.document._eventInitializers.devicemotion = function() {
-	if( !accelerometer ) {
-		accelerometer = new Ejecta.Accelerometer();
-		accelerometer.ondevicemotion = function( x, y, z ){
-			deviceMotionEvent.accelerationIncludingGravity.x = x;
-			deviceMotionEvent.accelerationIncludingGravity.y = y;
-			deviceMotionEvent.accelerationIncludingGravity.z = z;
-			document._publishEvent( 'devicemotion', deviceMotionEvent );
-		};
+var deviceOrientationEvent = {
+	type: 'deviceorientation', 
+	target: canvas,
+	alpha: null,
+	beta: null,
+	gamma: null,
+	absolute: true,
+	preventDefault: function(){},
+	stopPropagation: function(){}
+};
+
+eventInit.deviceorientation = eventInit.devicemotion = function() {
+	if( deviceMotion ) { return; }
+	
+	deviceMotion = new Ejecta.DeviceMotion();
+	deviceMotionEvent.interval = deviceMotion.interval;
+	
+	// Callback for Devices that have a Gyro
+	deviceMotion.ondevicemotion = function( agx, agy, agz, ax, ay, az, rx, ry, rz, ox, oy, oz ) {
+		deviceMotionEvent.accelerationIncludingGravity.x = agx;
+		deviceMotionEvent.accelerationIncludingGravity.y = agy;
+		deviceMotionEvent.accelerationIncludingGravity.z = agz;
+	
+		deviceMotionEvent.acceleration.x = ax;
+		deviceMotionEvent.acceleration.y = ay;
+		deviceMotionEvent.acceleration.z = az;
+
+		deviceMotionEvent.rotationRate.alpha = rx;
+		deviceMotionEvent.rotationRate.beta = ry;
+		deviceMotionEvent.rotationRate.gamma = rz;
+
+		document._publishEvent( deviceMotionEvent );
+
+
+		deviceOrientationEvent.alpha = ox;
+		deviceOrientationEvent.beta = oy;
+		deviceOrientationEvent.gamma = oz;
+
+		document._publishEvent( deviceOrientationEvent );
+	};
+	
+	// Callback for Devices that only have an accelerometer
+	deviceMotion.onacceleration = function( agx, agy, agz ) {
+		deviceMotionEvent.accelerationIncludingGravity.x = agx;
+		deviceMotionEvent.accelerationIncludingGravity.y = agy;
+		deviceMotionEvent.accelerationIncludingGravity.z = agz;
+	
+		deviceMotionEvent.acceleration = null;
+		deviceMotionEvent.rotationRate = null;
+	
+		document._publishEvent( deviceMotionEvent );
 	}
 };
 
+
+
+// Application lifecycle events (pagehide/pageshow)
+
+var lifecycle = null;
+var lifecycleEvent = {
+	type: 'pagehide',
+	target: window.document,
+	preventDefault: function(){},
+	stopPropagation: function(){}
+};
+
+eventInit.pagehide = eventInit.pageshow = function() {
+	if( !lifecycle ) {
+		lifecycle = new Ejecta.Lifecycle();
+		
+		lifecycle.onpagehide = function() {
+			lifecycleEvent.type = 'pagehide';
+			document._publishEvent( lifecycleEvent );
+		};
+		lifecycle.onpageshow = function() {
+			lifecycleEvent.type = 'pageshow';
+			document._publishEvent( lifecycleEvent );
+		}
+	}
+};
 
 })(this);

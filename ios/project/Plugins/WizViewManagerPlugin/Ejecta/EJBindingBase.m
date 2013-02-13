@@ -10,21 +10,46 @@ void _ej_class_finalize(JSObjectRef object) {
 NSData * NSDataFromString( NSString *str ) {
 	int len = [str length] + 1;
 	NSMutableData * d = [NSMutableData dataWithLength:len];
-	strlcpy([d mutableBytes], [str UTF8String], len);
+	strlcpy(d.mutableBytes, str.UTF8String, len);
 	return d;
 }
+
+static NSMutableDictionary * CachedJSClasses;
 
 
 @implementation EJBindingBase
 
-- (id)initWithContext:(JSContextRef)ctxp object:(JSObjectRef)obj argc:(size_t)argc argv:(const JSValueRef [])argv {
+- (id)initWithContext:(JSContextRef)ctxp argc:(size_t)argc argv:(const JSValueRef [])argv {
 	if( self  = [super init] ) {
-		jsObject = obj;
 	}
 	return self;
 }
 
 + (JSClassRef)getJSClass {
+	id ownClass = [self class];
+	
+	// Try the cache first
+	if( !CachedJSClasses ) {
+		CachedJSClasses = [[NSMutableDictionary alloc] initWithCapacity:16];
+	}
+	
+	JSClassRef jsClass = [[CachedJSClasses objectForKey:ownClass] pointerValue];
+	if( jsClass ) {
+		return jsClass;
+	}
+	
+	// Still here? Create and insert into cache
+	jsClass = [self createJSClass];
+	[CachedJSClasses setObject:[NSValue valueWithPointer:jsClass] forKey:ownClass];
+	return jsClass;
+}
+
++ (void)clearJSClassCache {
+	[CachedJSClasses release];
+	CachedJSClasses = NULL;
+}
+
++ (JSClassRef)createJSClass {
 	// Gather all class methods that return C callbacks for this class or it's parents
 	NSMutableArray * methods = [[NSMutableArray alloc] init];
 	NSMutableArray * properties = [[NSMutableArray alloc] init];
@@ -36,21 +61,17 @@ NSData * NSDataFromString( NSString *str ) {
 		// Traverse all class methods for this class; i.e. all classes that are defined with the
 		// EJ_BIND_FUNCTION, EJ_BIND_GET or EJ_BIND_SET macros
 		u_int count;
-		Method * methodList = class_copyMethodList(sc, &count);
+		Method * methodList = class_copyMethodList(object_getClass(sc), &count);
 		for (int i = 0; i < count ; i++) {
 			SEL selector = method_getName(methodList[i]);
 			NSString * name = NSStringFromSelector(selector);
 			
-			if( [name hasPrefix:@"_func_"] ) {
-				NSString * shortName = [[[name componentsSeparatedByString:@":"] objectAtIndex:0] 
-					substringFromIndex:sizeof("_func_")-1];
-				[methods addObject:shortName];
+			if( [name hasPrefix:@"_ptr_to_func_"] ) {
+				[methods addObject: [name substringFromIndex:sizeof("_ptr_to_func_")-1] ];
 			}
-			else if( [name hasPrefix:@"_get_"] ) {
+			else if( [name hasPrefix:@"_ptr_to_get_"] ) {
 				// We only look for getters - a property that has a setter, but no getter will be ignored
-				NSString * shortName = [[[name componentsSeparatedByString:@":"] objectAtIndex:0] 
-					substringFromIndex:sizeof("_get_")-1];
-				[properties addObject:shortName];
+				[properties addObject: [name substringFromIndex:sizeof("_ptr_to_get_")-1] ];
 			}
 		}
 		free(methodList);
@@ -58,8 +79,7 @@ NSData * NSDataFromString( NSString *str ) {
 	
 	
 	// Set up the JSStaticValue struct array
-	JSStaticValue * values = malloc( sizeof(JSStaticValue) * (properties.count+1) );
-	memset( values, 0, sizeof(JSStaticValue) * (properties.count+1) );
+	JSStaticValue * values = calloc( properties.count + 1, sizeof(JSStaticValue) );
 	for( int i = 0; i < properties.count; i++ ) {
 		NSString * name = [properties objectAtIndex:i];
 		NSData * nameData = NSDataFromString( name );
@@ -67,12 +87,11 @@ NSData * NSDataFromString( NSString *str ) {
 		values[i].name = [nameData bytes];
 		values[i].attributes = kJSPropertyAttributeDontDelete;
 		
-		SEL get = NSSelectorFromString([NSString stringWithFormat:@"_callback_for_get_%@", name]);
+		SEL get = NSSelectorFromString([NSString stringWithFormat:@"_ptr_to_get_%@", name]);
 		values[i].getProperty = (JSObjectGetPropertyCallback)[self performSelector:get];
 		
-		SEL set = NSSelectorFromString([NSString stringWithFormat:@"_callback_for_set_%@", name]);
-		
 		// Property has a setter? Otherwise mark as read only
+		SEL set = NSSelectorFromString([NSString stringWithFormat:@"_ptr_to_set_%@", name]);
 		if( [self respondsToSelector:set] ) {
 			values[i].setProperty = (JSObjectSetPropertyCallback)[self performSelector:set];
 		}
@@ -82,8 +101,7 @@ NSData * NSDataFromString( NSString *str ) {
 	}
 	
 	// Set up the JSStaticFunction struct array
-	JSStaticFunction * functions = malloc( sizeof(JSStaticFunction) * (methods.count+1) );
-	memset( functions, 0, sizeof(JSStaticFunction) * (methods.count+1) );
+	JSStaticFunction * functions = calloc( methods.count + 1, sizeof(JSStaticFunction) );
 	for( int i = 0; i < methods.count; i++ ) {
 		NSString * name = [methods objectAtIndex:i];
 		NSData * nameData = NSDataFromString( name );
@@ -91,11 +109,12 @@ NSData * NSDataFromString( NSString *str ) {
 		functions[i].name = [nameData bytes];
 		functions[i].attributes = kJSPropertyAttributeDontDelete;
 		
-		SEL call = NSSelectorFromString([NSString stringWithFormat:@"_callback_for_func_%@", name]);
+		SEL call = NSSelectorFromString([NSString stringWithFormat:@"_ptr_to_func_%@", name]);
 		functions[i].callAsFunction = (JSObjectCallAsFunctionCallback)[self performSelector:call];
 	}
 	
 	JSClassDefinition classDef = kJSClassDefinitionEmpty;
+	classDef.className = class_getName(self.class) + sizeof("EJBinding")-1;
 	classDef.finalize = _ej_class_finalize;
 	classDef.staticValues = values;
 	classDef.staticFunctions = functions;
@@ -108,6 +127,16 @@ NSData * NSDataFromString( NSString *str ) {
 	[methods release];
 	
 	return class;
+}
+
++ (JSObjectRef)createJSObjectWithContext:(JSContextRef)ctx instance:(EJBindingBase *)instance {
+	JSClassRef jsClass = [self getJSClass];
+	
+	JSObjectRef obj = JSObjectMake( ctx, jsClass, NULL );
+	JSObjectSetPrivate( obj, (void *)instance );
+	instance->jsObject = obj;
+	
+	return obj;
 }
 
 @end

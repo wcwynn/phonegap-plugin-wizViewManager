@@ -3,12 +3,12 @@
 
 @implementation EJBindingTouchInput
 
-- (id)initWithContext:(JSContextRef)ctx object:(JSObjectRef)obj argc:(size_t)argc argv:(const JSValueRef [])argv {
-	if( self = [super initWithContext:ctx object:obj argc:argc argv:argv] ) {
-        
+- (id)initWithContext:(JSContextRef)ctx argc:(size_t)argc argv:(const JSValueRef [])argv {
+	if( self = [super initWithContext:ctx argc:argc argv:argv] ) {
+	
 		// Create the JavaScript arrays that will be passed to the callback
-		jsAllTouches = JSObjectMakeArray(ctx, 0, NULL, NULL);
-		JSValueProtect(ctx, jsAllTouches);
+		jsRemainingTouches = JSObjectMakeArray(ctx, 0, NULL, NULL);
+		JSValueProtect(ctx, jsRemainingTouches);
 		
 		jsChangedTouches = JSObjectMakeArray(ctx, 0, NULL, NULL);
 		JSValueProtect(ctx, jsChangedTouches);
@@ -36,7 +36,7 @@
 - (void)dealloc {
 	JSContextRef ctx = [WizCanvasView instance].jsGlobalContext;
 	
-	JSValueUnprotect( ctx, jsAllTouches );
+	JSValueUnprotect( ctx, jsRemainingTouches );
 	JSValueUnprotect( ctx, jsChangedTouches );
 	JSStringRelease( jsLengthName );
 	
@@ -53,17 +53,19 @@
 	[super dealloc];
 }
 
-- (void)triggerEvent:(NSString *)name withChangedTouches:(NSSet *)changed allTouches:(NSSet *)all {
+- (void)triggerEvent:(NSString *)name all:(NSSet *)all changed:(NSSet *)changed remaining:(NSSet *)remaining {
 	WizCanvasView * ejecta = [WizCanvasView instance];
 	JSContextRef ctx = ejecta.jsGlobalContext;
 	float scale = ejecta.internalScaling;
 	
-	JSObjectSetProperty(ctx, jsAllTouches, jsLengthName, JSValueMakeNumber(ctx, all.count), kJSPropertyAttributeNone, NULL);
+	JSObjectSetProperty(ctx, jsRemainingTouches, jsLengthName, JSValueMakeNumber(ctx, remaining.count), kJSPropertyAttributeNone, NULL);
 	JSObjectSetProperty(ctx, jsChangedTouches, jsLengthName, JSValueMakeNumber(ctx, changed.count), kJSPropertyAttributeNone, NULL);
 	
-	int allTouchesIndex = 0,
-    changedTouchesIndex = 0;
-    
+	int
+		poolIndex = 0,
+		remainingIndex = 0,
+		changedIndex = 0;
+		
 	for( UITouch * touch in all ) {
 		CGPoint pos = [touch locationInView:touch.view];
 		
@@ -71,25 +73,25 @@
 		JSValueRef x = JSValueMakeNumber(ctx, pos.x / scale );
 		JSValueRef y = JSValueMakeNumber(ctx, pos.y / scale );
 		
-		JSObjectRef jsTouch = jsTouchesPool[allTouchesIndex];
+		JSObjectRef jsTouch = jsTouchesPool[poolIndex++];
 		JSObjectSetProperty( ctx, jsTouch, jsIdentifierName, identifier, kJSPropertyAttributeNone, NULL );
 		JSObjectSetProperty( ctx, jsTouch, jsPageXName, x, kJSPropertyAttributeNone, NULL );
 		JSObjectSetProperty( ctx, jsTouch, jsPageYName, y, kJSPropertyAttributeNone, NULL );
 		JSObjectSetProperty( ctx, jsTouch, jsClientXName, x, kJSPropertyAttributeNone, NULL );
 		JSObjectSetProperty( ctx, jsTouch, jsClientYName, y, kJSPropertyAttributeNone, NULL );
 		
-		JSObjectSetPropertyAtIndex(ctx, jsAllTouches, allTouchesIndex, jsTouch, NULL);
-		allTouchesIndex++;
-		
-		if( [changed member:touch] ) {
-			JSObjectSetPropertyAtIndex(ctx, jsChangedTouches, changedTouchesIndex, jsTouch, NULL);
-			changedTouchesIndex++;
+		if( [remaining member:touch] ) {
+			JSObjectSetPropertyAtIndex(ctx, jsRemainingTouches, remainingIndex++, jsTouch, NULL);
 		}
 		
-		if( allTouchesIndex >= EJ_TOUCH_INPUT_MAX_TOUCHES ) { break; }
+		if( [changed member:touch] ) {
+			JSObjectSetPropertyAtIndex(ctx, jsChangedTouches, changedIndex++, jsTouch, NULL);
+		}
+		
+		if( poolIndex >= EJ_TOUCH_INPUT_MAX_TOUCHES ) { break; }
 	}
 	
-	[self triggerEvent:name argc:2 argv:(JSValueRef[]){ jsAllTouches, jsChangedTouches }];
+	[self triggerEvent:name argc:2 argv:(JSValueRef[]){ jsRemainingTouches, jsChangedTouches }];
 }
 
 EJ_BIND_EVENT(touchstart);

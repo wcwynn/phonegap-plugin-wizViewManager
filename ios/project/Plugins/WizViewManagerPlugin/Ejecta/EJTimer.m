@@ -6,7 +6,6 @@
 - (id)init {
 	if( self = [super init] ) {
 		timers = [[NSMutableDictionary alloc] init];
-        lastId = 0;
 	}
 	return self;
 }
@@ -16,7 +15,7 @@
 	[super dealloc];
 }
 
-- (int)scheduleCallback:(JSObjectRef)callback interval:(float)interval repeat:(BOOL)repeat {
+- (int)scheduleCallback:(JSObjectRef)callback interval:(NSTimeInterval)interval repeat:(BOOL)repeat {
 	lastId++;
 	
 	EJTimer * timer = [[EJTimer alloc] initWithCallback:callback interval:interval repeat:repeat];
@@ -48,10 +47,11 @@
 @property (nonatomic, retain) NSDate *target;
 @end
 
+
 @implementation EJTimer
 @synthesize active;
 
-- (id)initWithCallback:(JSObjectRef)callbackp interval:(float)intervalp repeat:(BOOL)repeatp {
+- (id)initWithCallback:(JSObjectRef)callbackp interval:(NSTimeInterval)intervalp repeat:(BOOL)repeatp {
 	if( self = [super init] ) {
 		active = true;
 		interval = intervalp;
@@ -66,16 +66,15 @@
 
 - (void)dealloc {
 	JSValueUnprotect([WizCanvasView instance].jsGlobalContext, callback);
-    self.target = nil;
 	[super dealloc];
 }
 
-- (void)check {
-	if( active && [self.target timeIntervalSinceNow] <= 0 ) {
+- (void)check {	
+	if( active && self.target.timeIntervalSinceNow <= 0 ) {
 		[[WizCanvasView instance] invokeCallback:callback thisObject:NULL argc:0 argv:NULL];
 		
 		if( repeat ) {
-            self.target = [NSDate dateWithTimeIntervalSinceNow:interval];
+			self.target = [NSDate dateWithTimeIntervalSinceNow:interval];
 		}
 		else {
 			active = false;

@@ -3,8 +3,8 @@
 
 @implementation EJBindingAdBanner
 
-- (id)initWithContext:(JSContextRef)ctx object:(JSObjectRef)obj argc:(size_t)argc argv:(const JSValueRef [])argv {
-	if( self = [super initWithContext:ctx object:obj argc:argc argv:argv] ) {
+- (id)initWithContext:(JSContextRef)ctx argc:(size_t)argc argv:(const JSValueRef [])argv {
+	if( self = [super initWithContext:ctx argc:argc argv:argv] ) {
 		isAtBottom = NO;
 		wantsToShow = NO;
 		isReady = NO;
@@ -19,7 +19,7 @@
 				: ADBannerContentSizeIdentifierPortrait),
 			nil];
 		
-		[[WizCanvasView instance].window addSubview:banner];
+		[[WizCanvasView instance].view addSubview:banner];
 		NSLog(@"AdBanner: init at y %f", banner.frame.origin.y);
 	}
 	return self;
@@ -35,7 +35,7 @@
 	NSLog(@"AdBanner: Ad loaded");
 	isReady = YES;
 	if( wantsToShow ) {
-		[[WizCanvasView instance].window bringSubviewToFront:banner];
+		[[WizCanvasView instance].view bringSubviewToFront:banner];
 		banner.hidden = NO;
 	}
 	[self triggerEvent:@"load" argc:0 argv:NULL];
@@ -57,7 +57,7 @@ EJ_BIND_SET( isAtBottom, ctx, value ) {
 	
 	CGRect frame = banner.frame;
 	frame.origin.y = isAtBottom
-		? [WizCanvasView instance].window.bounds.size.height - frame.size.height
+		? [WizCanvasView instance].view.bounds.size.height - frame.size.height
 		: 0;
 		
 	banner.frame = frame;
@@ -72,7 +72,7 @@ EJ_BIND_FUNCTION(hide, ctx, argc, argv ) {
 EJ_BIND_FUNCTION(show, ctx, argc, argv ) {
 	wantsToShow = YES;
 	if( isReady ) {
-		[[WizCanvasView instance].window bringSubviewToFront:banner];
+		[[WizCanvasView instance].view bringSubviewToFront:banner];
 		banner.hidden = NO;
 	}
 	return NULL;

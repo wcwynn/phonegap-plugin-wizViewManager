@@ -14,7 +14,7 @@
 
 #import "Ejecta/EJBindingBase.h"
 #import "Ejecta/EJCanvas/EJCanvasContext.h"
-#import "Ejecta/EJCanvas/EJCanvasContextScreen.h"
+#import "Ejecta/EJCanvas/EJPresentable.h"
 #import "Ejecta/EJTimer.h"
 
 
@@ -40,15 +40,9 @@ JSValueRef ej_getNativeClass(JSContextRef ctx, JSObjectRef object, JSStringRef p
 }
 
 JSObjectRef ej_callAsConstructor(JSContextRef ctx, JSObjectRef constructor, size_t argc, const JSValueRef argv[], JSValueRef* exception) {
-	id class = (id)JSObjectGetPrivate( constructor );
-	
-	JSClassRef jsClass = [[WizCanvasView instance] getJSClassForClass:class];
-	JSObjectRef obj = JSObjectMake( ctx, jsClass, NULL );
-	
-	id instance = [(EJBindingBase *)[class alloc] initWithContext:ctx object:obj argc:argc argv:argv];
-	JSObjectSetPrivate( obj, (void *)instance );
-	
-	return obj;
+	Class class = (Class)JSObjectGetPrivate( constructor );
+	EJBindingBase * instance = [(EJBindingBase *)[class alloc] initWithContext:ctx argc:argc argv:argv];
+	return [class createJSObjectWithContext:ctx instance:instance];
 }
 
 
@@ -59,10 +53,20 @@ JSObjectRef ej_callAsConstructor(JSContextRef ctx, JSObjectRef constructor, size
 // the initial JavaScript source files
 @implementation WizCanvasView
 
+@synthesize textureCache;
+@synthesize openALManager;
+@synthesize glProgram2DFlat;
+@synthesize glProgram2DTexture;
+@synthesize glProgram2DAlphaTexture;
+@synthesize glProgram2DPattern;
+@synthesize glProgram2DRadialGradient;
 @synthesize landscapeMode;
 @synthesize jsGlobalContext;
+@synthesize glContext2D;
+@synthesize glSharegroup;
 @synthesize window;
 @synthesize touchDelegate;
+@synthesize lifecycleDelegate;
 
 @synthesize opQueue;
 @synthesize currentRenderingContext;
@@ -94,7 +98,7 @@ static WizCanvasView * ejectaInstance = NULL;
 		// Show the loading screen - commented out for now.
 		// This causes some visual quirks on different devices, as the launch screen may be a
 		// different one than we loade here - let's rather show a black screen for 200ms...
-		//NSString * loadingScreenName = [EJApp landscapeMode] ? @"Default-Landscape.png" : @"Default-Portrait.png";
+		//NSString * loadingScreenName = [WizCanvasView landscapeMode] ? @"Default-Landscape.png" : @"Default-Portrait.png";
 		//loadingScreen = [[UIImageView alloc] initWithImage:[UIImage imageNamed:loadingScreenName]];
 		//loadingScreen.frame = self.view.bounds;
 		//[self.view addSubview:loadingScreen];
@@ -114,8 +118,7 @@ static WizCanvasView * ejectaInstance = NULL;
 		
         
 		// Create the global JS context and attach the 'Ejecta' object
-		jsClasses = [[NSMutableDictionary alloc] init];
-        
+		
 		JSClassDefinition constructorClassDef = kJSClassDefinitionEmpty;
 		constructorClassDef.callAsConstructor = ej_callAsConstructor;
 		ej_constructorClass = JSClassCreate(&constructorClassDef);
@@ -123,8 +126,8 @@ static WizCanvasView * ejectaInstance = NULL;
 		JSClassDefinition globalClassDef = kJSClassDefinitionEmpty;
 		globalClassDef.getProperty = ej_getNativeClass;
 		JSClassRef globalClass = JSClassCreate(&globalClassDef);
-        
-        
+		
+		
 		jsGlobalContext = JSGlobalContextCreate(NULL);
 		ej_global_undefined = JSValueMakeUndefined(jsGlobalContext);
 		JSValueProtect(jsGlobalContext, ej_global_undefined);
@@ -136,7 +139,13 @@ static WizCanvasView * ejectaInstance = NULL;
                             JSStringCreateWithUTF8CString("Ejecta"), iosObject,
                             kJSPropertyAttributeDontDelete | kJSPropertyAttributeReadOnly, NULL
                             );
-        
+		
+		// Create the OpenGL context for Canvas2D
+		glContext2D = [[EAGLContext alloc] initWithAPI:kEAGLRenderingAPIOpenGLES2];
+		glSharegroup = glContext2D.sharegroup;
+		glCurrentContext = glContext2D;
+		[EAGLContext setCurrentContext:glCurrentContext];
+		
 		// Load the initial JavaScript source files
 	    [self loadScriptAtPath:EJECTA_BOOT_JS];
         
@@ -160,11 +169,21 @@ static WizCanvasView * ejectaInstance = NULL;
 	JSGlobalContextRelease(jsGlobalContext);
 	[currentRenderingContext release];
 	[touchDelegate release];
-	[jsClasses release];
+	[lifecycleDelegate release];
 	[opQueue release];
 	
+	[displayLink invalidate];
 	[displayLink release];
 	[timers release];
+	
+	[textureCache release];
+	[openALManager release];
+	[glProgram2DFlat release];
+	[glProgram2DTexture release];
+	[glProgram2DAlphaTexture release];
+	[glProgram2DPattern release];
+	[glProgram2DRadialGradient release];
+	[glContext2D release];
 	[super dealloc];
 }
 
@@ -211,6 +230,9 @@ static WizCanvasView * ejectaInstance = NULL;
 
 
 - (void)pause {
+	if( paused ) { return; }
+	
+	[lifecycleDelegate pause];
 	[displayLink removeFromRunLoop:[NSRunLoop currentRunLoop] forMode:NSDefaultRunLoopMode];
 	[screenRenderingContext finish];
 	paused = true;
@@ -218,7 +240,10 @@ static WizCanvasView * ejectaInstance = NULL;
 
 
 - (void)resume {
-	[screenRenderingContext resetGLContext];
+	if( !paused ) { return; }
+	
+	[lifecycleDelegate resume];
+	[EAGLContext setCurrentContext:glCurrentContext];
 	[displayLink addToRunLoop:[NSRunLoop currentRunLoop] forMode:NSDefaultRunLoopMode];
 	paused = false;
 }
@@ -262,21 +287,57 @@ static WizCanvasView * ejectaInstance = NULL;
 
 - (void)loadScriptAtPath:(NSString *)path {
 	NSString * script = [NSString stringWithContentsOfFile:[self pathForResource:path] encoding:NSUTF8StringEncoding error:NULL];
-
+	
 	if( !script ) {
-		NSLog(@"[loadScriptAtPath] Error: Can't Find Script %@", path );
+		NSLog(@"Error: Can't Find Script %@", path );
 		return;
 	}
 	
 	NSLog(@"Loading Script: %@", path );
 	JSStringRef scriptJS = JSStringCreateWithCFString((CFStringRef)script);
 	JSStringRef pathJS = JSStringCreateWithCFString((CFStringRef)path);
-
+	
 	JSValueRef exception = NULL;
 	JSEvaluateScript( jsGlobalContext, scriptJS, NULL, pathJS, 0, &exception );
 	[self logException:exception ctx:jsGlobalContext];
     
 	JSStringRelease( scriptJS );
+	JSStringRelease( pathJS );
+}
+
+- (JSValueRef)loadModuleWithId:(NSString *)moduleId module:(JSValueRef)module exports:(JSValueRef)exports {
+	NSString * path = [moduleId stringByAppendingString:@".js"];
+	NSString * script = [NSString stringWithContentsOfFile:[self pathForResource:path] encoding:NSUTF8StringEncoding error:NULL];
+	
+	if( !script ) {
+		NSLog(@"Error: Can't Find Module %@", moduleId );
+		return NULL;
+	}
+	
+	NSLog(@"Loading Module: %@", moduleId );
+	
+	JSStringRef scriptJS = JSStringCreateWithCFString((CFStringRef)script);
+	JSStringRef pathJS = JSStringCreateWithCFString((CFStringRef)path);
+	JSStringRef parameterNames[] = {
+		JSStringCreateWithUTF8CString("module"),
+		JSStringCreateWithUTF8CString("exports"),
+	};
+	
+	JSValueRef exception = NULL;
+	JSObjectRef func = JSObjectMakeFunction( jsGlobalContext, NULL, 2,  parameterNames, scriptJS, pathJS, 0, &exception );
+	
+	JSStringRelease( scriptJS );
+	JSStringRelease( pathJS );
+	JSStringRelease(parameterNames[0]);
+	JSStringRelease(parameterNames[1]);
+	
+	if( exception ) {
+		[self logException:exception ctx:jsGlobalContext];
+		return NULL;
+	}
+	
+	JSValueRef params[] = { module, exports };
+	return [self invokeCallback:func thisObject:NULL argc:2 argv:params];
 }
 
 - (JSValueRef)invokeCallback:(JSObjectRef)callback thisObject:(JSObjectRef)thisObject argc:(size_t)argc argv:(const JSValueRef [])argv {
@@ -284,16 +345,6 @@ static WizCanvasView * ejectaInstance = NULL;
 	JSValueRef result = JSObjectCallAsFunction( jsGlobalContext, callback, thisObject, argc, argv, &exception );
 	[self logException:exception ctx:jsGlobalContext];
 	return result;
-}
-
-- (JSClassRef)getJSClassForClass:(id)classId {
-	JSClassRef jsClass = [[jsClasses objectForKey:classId] pointerValue];
-	// Not already loaded? Ask the objc class for the JSClassRef!
-	if( !jsClass ) {
-		jsClass = [classId getJSClass];
-		[jsClasses setObject:[NSValue valueWithPointer:jsClass] forKey:classId];
-	}
-	return jsClass;
 }
 
 - (void)logException:(JSValueRef)exception ctx:(JSContextRef)ctxp {
@@ -322,23 +373,23 @@ static WizCanvasView * ejectaInstance = NULL;
 // ---------------------------------------------------------------------------------
 // Touch handlers
 
-
 - (void)touchesBegan:(NSSet *)touches withEvent:(UIEvent *)event {
-    
-    [touchDelegate triggerEvent:@"touchstart" withChangedTouches:touches allTouches:[event allTouches]];
+	[touchDelegate triggerEvent:@"touchstart" all:event.allTouches changed:touches remaining:event.allTouches];
 }
 
 - (void)touchesEnded:(NSSet *)touches withEvent:(UIEvent *)event {
-    
-    [touchDelegate triggerEvent:@"touchend" withChangedTouches:touches allTouches:[event allTouches]];
+	NSMutableSet * remaining = [[event.allTouches mutableCopy] autorelease];
+	[remaining minusSet:touches];
+	
+	[touchDelegate triggerEvent:@"touchend" all:event.allTouches changed:touches remaining:remaining];
 }
 
 - (void)touchesCancelled:(NSSet *)touches withEvent:(UIEvent *)event {
-    [touchDelegate triggerEvent:@"touchend" withChangedTouches:touches allTouches:[event allTouches]];
+	[self touchesEnded:touches withEvent:event];
 }
 
 - (void)touchesMoved:(NSSet *)touches withEvent:(UIEvent *)event {
-    [touchDelegate triggerEvent:@"touchmove" withChangedTouches:touches allTouches:[event allTouches]];
+	[touchDelegate triggerEvent:@"touchmove" all:event.allTouches changed:touches remaining:event.allTouches];
 }
 
 
@@ -369,14 +420,52 @@ static WizCanvasView * ejectaInstance = NULL;
 	return NULL;
 }
 
+#define EJ_GL_PROGRAM_GETTER(TYPE, NAME) \
+- (TYPE *)glProgram2D##NAME { \
+if( !glProgram2D##NAME ) { \
+glProgram2D##NAME = [[TYPE alloc] initWithVertexShader:@"Vertex.vsh" fragmentShader: @ #NAME @".fsh"]; \
+} \
+return glProgram2D##NAME; \
+}
+
+EJ_GL_PROGRAM_GETTER(EJGLProgram2D, Flat);
+EJ_GL_PROGRAM_GETTER(EJGLProgram2D, Texture);
+EJ_GL_PROGRAM_GETTER(EJGLProgram2D, AlphaTexture);
+EJ_GL_PROGRAM_GETTER(EJGLProgram2D, Pattern);
+EJ_GL_PROGRAM_GETTER(EJGLProgram2DRadialGradient, RadialGradient);
+
+#undef EJ_GL_PROGRAM_GETTER
+
+- (EJOpenALManager *)openALManager {
+	if( !openALManager ) {
+		openALManager = [[EJOpenALManager alloc] init];
+	}
+	return openALManager;
+}
+
+- (NSMutableDictionary *)textureCache {
+	if( !textureCache ) {
+		// Create a non-retaining Dictionary to hold the cached textures
+		textureCache = (NSMutableDictionary*)CFDictionaryCreateMutable(NULL, 8, &kCFCopyStringDictionaryKeyCallBacks, NULL);
+	}
+	return textureCache;
+}
+
 - (void)setCurrentRenderingContext:(EJCanvasContext *)renderingContext {
 	if( renderingContext != currentRenderingContext ) {
 		[currentRenderingContext flushBuffers];
 		[currentRenderingContext release];
+		
+		// Switch GL Context if different
+		if( renderingContext && renderingContext.glContext != glCurrentContext ) {
+			glFlush();
+			glCurrentContext = renderingContext.glContext;
+			[EAGLContext setCurrentContext:glCurrentContext];
+		}
+		
 		[renderingContext prepare];
 		currentRenderingContext = [renderingContext retain];
 	}
 }
-
 
 @end

@@ -9,7 +9,7 @@
                  argc:(size_t)argc
                  argv:(const JSValueRef [])argv
 {
-    if( self = [super initWithContext:ctx object:obj argc:argc argv:argv] ) {
+    if( self = [super initWithContext:ctx argc:argc argv:argv] ) {
 
         if( argc > 0 ) {
             // push the view's name into window
